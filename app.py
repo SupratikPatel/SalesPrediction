@@ -119,7 +119,8 @@ class SalesPredictor:
             insights = self.generate_ai_insights(processed_data)
 
             # Save model
-            with open('sales_model.pkl', 'wb') as f:
+            model_path = os.path.join('models', 'sales_model.pkl')
+            with open(model_path, 'wb') as f:
                 pickle.dump({
                     'model': self.model,
                     'scaler': self.scaler,
@@ -132,6 +133,68 @@ class SalesPredictor:
             logger.error(f"Error in model training: {str(e)}")
             raise
 
+    def visualize_results(self, actual: np.array, predicted: np.array, dates: pd.Series) -> str:
+        """
+        Create and save visualization of actual vs predicted sales
+        """
+        try:
+            # Clear any existing plots
+            plt.clf()
+
+            # Create the plot
+            plt.figure(figsize=(15, 7))
+
+            # Plot actual sales with styling
+            plt.plot(dates, actual,
+                     label='Actual Sales',
+                     marker='o',
+                     linestyle='-',
+                     color='#2E86C1',
+                     markersize=4,
+                     alpha=0.8)
+
+            # Plot predicted sales with styling
+            plt.plot(dates, predicted,
+                     label='Predicted Sales',
+                     marker='x',
+                     linestyle='--',
+                     color='#E74C3C',
+                     markersize=4,
+                     alpha=0.8)
+
+            # Customize the plot
+            plt.title('Sales Prediction Analysis', fontsize=14, pad=20)
+            plt.xlabel('Date', fontsize=12)
+            plt.ylabel('Sales Volume', fontsize=12)
+
+            # Add grid for better readability
+            plt.grid(True, linestyle='--', alpha=0.3)
+
+            # Customize legend
+            plt.legend(fontsize=10, loc='upper left')
+
+            # Rotate x-axis labels
+            plt.xticks(rotation=45)
+
+            # Add subtle background grid
+            plt.grid(True, linestyle='--', alpha=0.2)
+
+            # Adjust layout
+            plt.tight_layout()
+
+            # Ensure static directory exists
+            os.makedirs('static', exist_ok=True)
+
+            # Save plot
+            plot_path = 'static/prediction_plot.png'
+            plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+            plt.close()
+
+            return plot_path
+
+        except Exception as e:
+            logger.error(f"Error creating visualization: {str(e)}")
+            raise
 
 @app.route('/')
 def home():
@@ -165,7 +228,8 @@ def predict():
         df['date'] = pd.to_datetime(df['date'])
 
         # Load model
-        with open('sales_model.pkl', 'rb') as f:
+        model_path = os.path.join('models', 'sales_model.pkl')
+        with open(model_path, 'rb') as f:
             model_data = pickle.load(f)
 
         predictor = SalesPredictor()
@@ -178,14 +242,23 @@ def predict():
         X_scaled = predictor.scaler.transform(X)
         predictions = predictor.model.predict(X_scaled)
 
+        # Generate visualization
+        plot_path = predictor.visualize_results(
+            actual=df['sales'].values,
+            predicted=predictions,
+            dates=df['date']
+        )
+
         # Generate AI insights
         insights = predictor.generate_ai_insights(df)
 
         return jsonify({
             'predictions': predictions.tolist(),
+            'plot_url': f'/{plot_path}',
             'insights': insights
         })
     except Exception as e:
+        logger.error(f"Prediction error: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 
