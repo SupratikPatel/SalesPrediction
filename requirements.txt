@@ -1,0 +1,14 @@
+# requirements.txt
+numpy
+pandas
+scikit-learn
+matplotlib
+seaborn
+flask
+openai
+python-dateutil
+requests
+typing-extensions
+python-dotenv
+langchain-community==0.3.3
+langchain-core==0.3.12

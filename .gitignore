@@ -1,0 +1,23 @@
+# Environment
+.env
+venv/
+__pycache__/
+
+# Generated files
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.pkl
+
+# Logs
+logs/
+*.log
+
+# Data
+data/uploads/
+static/plots/
+
+# IDE
+.vscode/
+.idea/
