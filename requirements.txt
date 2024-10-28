@@ -12,3 +12,4 @@ typing-extensions
 python-dotenv
 langchain-community==0.3.3
 langchain-core==0.3.12
+torch==2.3.1

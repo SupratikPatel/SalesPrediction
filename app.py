@@ -1,24 +1,30 @@
 import numpy as np
 import pandas as pd
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 import matplotlib.pyplot as plt
 from flask import Flask, request, jsonify, render_template
 import pickle
-import datetime
 from langchain_community.chat_models import ChatPerplexity
-from langchain_core.prompts import ChatPromptTemplate
 from dotenv import load_dotenv
 import os
 import logging
+from concurrent.futures import ThreadPoolExecutor
+import torch
 
-# Configure logging
+# Configure logging and environment
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# Load environment variables
 load_dotenv()
+
+# GPU Configuration
+if torch.cuda.is_available():
+    device = torch.device('cuda')
+    logger.info(f"Using GPU: {torch.cuda.get_device_name(0)}")
+else:
+    device = torch.device('cpu')
+    logger.info("GPU not available, using CPU")
 
 # Set up Perplexity API
 os.environ["PPLX_API_KEY"] = os.getenv("PPLX_API_KEY")
@@ -31,7 +37,8 @@ class SalesPredictor:
         self.model = RandomForestRegressor(
             n_estimators=100,
             max_depth=15,
-            random_state=42
+            random_state=42,
+            n_jobs=-1  # Use all CPU cores
         )
         self.scaler = StandardScaler()
         self.chat_model = ChatPerplexity(
@@ -39,42 +46,124 @@ class SalesPredictor:
             temperature=0.7
         )
 
+    def create_supervised_data(self, data, lag=12):
+        """Create supervised learning dataset with lagged features"""
+        df = pd.DataFrame(data)
+        columns = [df.shift(i) for i in range(1, lag + 1)]
+        columns.append(df)
+        df = pd.concat(columns, axis=1)
+        df.fillna(0, inplace=True)
+        return df
+
+    def create_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Enhanced feature engineering with parallel processing"""
+        df = df.copy()
+
+        # Parallel processing for time-based features
+        with ThreadPoolExecutor() as executor:
+            df['year'] = executor.submit(lambda x: x.dt.year, df['date']).result()
+            df['month'] = executor.submit(lambda x: x.dt.month, df['date']).result()
+            df['quarter'] = executor.submit(lambda x: x.dt.quarter, df['date']).result()
+            df['day_of_week'] = executor.submit(lambda x: x.dt.dayofweek, df['date']).result()
+
+        # Create sales difference features
+        df['sales_diff'] = df['sales'].diff()
+
+        # Create supervised data
+        sales_supervised = self.create_supervised_data(df['sales_diff'])
+
+        # Sales metrics using vectorized operations
+        for window in [7, 14, 30]:
+            df[f'sales_ma_{window}'] = (
+                df.groupby(['store', 'item'])['sales']
+                .transform(lambda x: x.rolling(window, min_periods=1).mean())
+            )
+            df[f'sales_std_{window}'] = (
+                df.groupby(['store', 'item'])['sales']
+                .transform(lambda x: x.rolling(window, min_periods=1).std())
+            )
+
+        return df
+
     def generate_ai_insights(self, sales_data: pd.DataFrame) -> str:
-        """Generate AI-powered insights from sales data using Perplexity"""
+        """Generate AI-powered insights from sales data with better formatting"""
         try:
             sales_summary = {
                 'total_sales': sales_data['sales'].sum(),
                 'avg_sales': sales_data['sales'].mean(),
-                'sales_growth': sales_data['sales'].pct_change().mean() * 100
+                'sales_growth': sales_data['sales'].pct_change().mean() * 100,
+                'peak_sales': sales_data['sales'].max(),
+                'lowest_sales': sales_data['sales'].min()
             }
 
-            # Create prompt template for sales analysis
-            prompt = ChatPromptTemplate.from_messages([
-                ("system", "You are a sales analysis expert. Analyze the sales data and provide strategic insights."),
-                ("human", f"""
-                Analyze this sales data and provide strategic insights:
-                Total Sales: ${sales_summary['total_sales']:,.2f}
-                Average Sales: ${sales_summary['avg_sales']:,.2f}
-                Sales Growth: {sales_summary['sales_growth']:.2f}%
+            prompt = f"""
+            Analyze this sales data and provide strategic insights in a well-formatted way:
 
-                Provide:
-                1. Key trends analysis
-                2. Business recommendations
-                3. Risk factors
-                4. Growth opportunities
-                """)
-            ])
+            Sales Summary:
+            • Total Sales: ${sales_summary['total_sales']:,.2f}
+            • Average Sales: ${sales_summary['avg_sales']:,.2f}
+            • Sales Growth: {sales_summary['sales_growth']:.2f}%
+            • Peak Sales: ${sales_summary['peak_sales']:,.2f}
+            • Lowest Sales: ${sales_summary['lowest_sales']:,.2f}
 
-            # Create chain and invoke
-            chain = prompt | self.chat_model
-            response = chain.invoke({})
+            Please provide insights in the following format:
 
-            return response.content
+            1. Key Trends:
+            • [Trend 1]
+            • [Trend 2]
+            • [Trend 3]
+
+            2. Business Recommendations:
+            • [Recommendation 1]
+            • [Recommendation 2]
+            • [Recommendation 3]
+
+            3. Risk Factors:
+            • [Risk 1]
+            • [Risk 2]
+            • [Risk 3]
+
+            4. Growth Opportunities:
+            • [Opportunity 1]
+            • [Opportunity 2]
+            • [Opportunity 3]
+
+            Format each section with bullet points and clear headers.
+            Keep each point concise and actionable.
+            """
+
+            response = self.chat_model.invoke(prompt)
+            formatted_insights = response.content
+
+            # Add HTML formatting
+            formatted_insights = formatted_insights.replace('1. Key Trends:',
+                                                            '<h4 class="insight-header">Key Trends:</h4>')
+            formatted_insights = formatted_insights.replace('2. Business Recommendations:',
+                                                            '<h4 class="insight-header">Business Recommendations:</h4>')
+            formatted_insights = formatted_insights.replace('3. Risk Factors:',
+                                                            '<h4 class="insight-header">Risk Factors:</h4>')
+            formatted_insights = formatted_insights.replace('4. Growth Opportunities:',
+                                                            '<h4 class="insight-header">Growth Opportunities:</h4>')
+
+            # Convert bullet points to HTML
+            formatted_insights = formatted_insights.replace('• ', '<li>')
+            formatted_insights = formatted_insights.replace('\n', '</li>\n')
+
+            # Wrap in proper HTML structure
+            formatted_insights = f"""
+            <div class="insights-container">
+                <h3 class="insights-title">AI-Generated Sales Insights</h3>
+                <div class="insights-content">
+                    {formatted_insights}
+                </div>
+            </div>
+            """
+
+            return formatted_insights
 
         except Exception as e:
             logger.error(f"Error generating AI insights: {str(e)}")
             return "Unable to generate AI insights at this time."
-
     def create_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """Enhanced feature engineering with advanced metrics"""
         df = df.copy()
