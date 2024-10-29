@@ -1,17 +1,35 @@
+# Standard libraries
+import os
+import io
+import logging
+from concurrent.futures import ThreadPoolExecutor
+from typing import Dict
+from datetime import datetime
+
+# Data processing and ML
 import numpy as np
 import pandas as pd
-from sklearn.preprocessing import StandardScaler, MinMaxScaler
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.preprocessing import StandardScaler
+from xgboost import XGBRegressor
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+
+# Visualization
 import matplotlib.pyplot as plt
-from flask import Flask, request, jsonify, render_template
+
+# Deep Learning
+import torch
+
+# FastAPI
+from fastapi import FastAPI, File, UploadFile, Request
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+import uvicorn
+
+# Other utilities
 import pickle
 from langchain_community.chat_models import ChatPerplexity
 from dotenv import load_dotenv
-import os
-import logging
-from concurrent.futures import ThreadPoolExecutor
-import torch
 
 # Configure logging and environment
 logging.basicConfig(level=logging.INFO)
@@ -29,20 +47,29 @@ else:
 # Set up Perplexity API
 os.environ["PPLX_API_KEY"] = os.getenv("PPLX_API_KEY")
 
-app = Flask(__name__)
+# Initialize FastAPI
+app = FastAPI(title="Sales Prediction System")
 
+# Mount static files directory
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# Setup templates
+templates = Jinja2Templates(directory="templates")
 
 class SalesPredictor:
     def __init__(self):
-        self.model = RandomForestRegressor(
+        self.model = XGBRegressor(
             n_estimators=100,
-            max_depth=15,
+            learning_rate=0.1,
+            max_depth=7,
             random_state=42,
-            n_jobs=-1  # Use all CPU cores
+            n_jobs=-1,
+            objective='reg:squarederror',
+            tree_method='gpu_hist' if torch.cuda.is_available() else 'hist'
         )
         self.scaler = StandardScaler()
         self.chat_model = ChatPerplexity(
-            model="llama-3.1-sonar-large-128k-online",
+            model="llama-3.1-sonar-small-128k-online",
             temperature=0.7
         )
 
@@ -84,6 +111,76 @@ class SalesPredictor:
             )
 
         return df
+
+    def train_model(self, train_data: pd.DataFrame) -> Dict:
+        """Train the model and generate insights"""
+        try:
+            processed_data = self.create_features(train_data)
+
+            # Use the same approach as the original code that worked
+            feature_cols = [col for col in processed_data.columns
+                            if col not in ['date', 'sales']]
+
+            X = processed_data[feature_cols]
+            y = processed_data['sales']
+
+            # Scale features
+            X_scaled = self.scaler.fit_transform(X)
+
+            # Modify XGBoost parameters to remove early_stopping if dataset is too small
+            if len(X) < 100:  # For small datasets
+                self.model = XGBRegressor(
+                    n_estimators=100,
+                    learning_rate=0.1,
+                    max_depth=7,
+                    random_state=42,
+                    n_jobs=-1,
+                    objective='reg:squarederror',
+                    tree_method='gpu_hist' if torch.cuda.is_available() else 'hist'
+                )
+                # Train without early stopping
+                self.model.fit(X_scaled, y)
+            else:
+                # For larger datasets, use validation set and early stopping
+                train_size = int(len(processed_data) * 0.8)
+                X_train = X_scaled[:train_size]
+                y_train = y[:train_size]
+                X_valid = X_scaled[train_size:]
+                y_valid = y[train_size:]
+
+                self.model.fit(
+                    X_train, y_train,
+                    eval_set=[(X_valid, y_valid)],
+                    verbose=True
+                )
+
+            # Generate predictions
+            y_pred = self.model.predict(X_scaled)
+
+            # Calculate metrics
+            metrics = {
+                'rmse': float(np.sqrt(mean_squared_error(y, y_pred))),
+                'mae': float(mean_absolute_error(y, y_pred)),
+                'r2': float(r2_score(y, y_pred))
+            }
+
+            # Generate AI insights
+            insights = self.generate_ai_insights(processed_data)
+
+            # Save model
+            os.makedirs('models', exist_ok=True)
+            with open('models/sales_model.pkl', 'wb') as f:
+                pickle.dump({
+                    'model': self.model,
+                    'scaler': self.scaler,
+                    'features': feature_cols
+                }, f)
+
+            return {'metrics': metrics, 'insights': insights}
+
+        except Exception as e:
+            logger.error(f"Error in model training: {str(e)}")
+            raise
 
     def generate_ai_insights(self, sales_data: pd.DataFrame) -> str:
         """Generate AI-powered insights from sales data with better formatting"""
@@ -165,48 +262,6 @@ class SalesPredictor:
             logger.error(f"Error generating AI insights: {str(e)}")
             return "Unable to generate AI insights at this time."
 
-    def train_model(self, train_data: pd.DataFrame) -> dict:
-        """Train the model and generate insights"""
-        try:
-            processed_data = self.create_features(train_data)
-
-            feature_cols = [col for col in processed_data.columns
-                            if col not in ['date', 'sales']]
-
-            X = processed_data[feature_cols]
-            y = processed_data['sales']
-
-            X_scaled = self.scaler.fit_transform(X)
-            self.model.fit(X_scaled, y)
-
-            # Generate predictions for training data
-            y_pred = self.model.predict(X_scaled)
-
-            # Calculate metrics
-            metrics = {
-                'rmse': np.sqrt(mean_squared_error(y, y_pred)),
-                'mae': mean_absolute_error(y, y_pred),
-                'r2': r2_score(y, y_pred)
-            }
-
-            # Generate AI insights
-            insights = self.generate_ai_insights(processed_data)
-
-            # Save model
-            model_path = os.path.join('models', 'sales_model.pkl')
-            with open(model_path, 'wb') as f:
-                pickle.dump({
-                    'model': self.model,
-                    'scaler': self.scaler,
-                    'features': feature_cols
-                }, f)
-
-            return {'metrics': metrics, 'insights': insights}
-
-        except Exception as e:
-            logger.error(f"Error in model training: {str(e)}")
-            raise
-
     def visualize_results(self, actual: np.array, predicted: np.array, dates: pd.Series) -> str:
         """
         Create and save visualization of actual vs predicted sales
@@ -270,39 +325,86 @@ class SalesPredictor:
             logger.error(f"Error creating visualization: {str(e)}")
             raise
 
-@app.route('/')
-def home():
-    return render_template('index.html')
+
+@app.get("/")
+async def home(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
 
 
-@app.route('/train', methods=['POST'])
-def train():
+# FastAPI routes:
+
+@app.post("/train")
+async def train(file: UploadFile = File(...)):
+    start_time = datetime.now()
+    logger.info(f"Training request received at {start_time}")
+
     try:
-        file = request.files['file']
-        df = pd.read_csv(file)
+        if not file:
+            return JSONResponse(
+                status_code=400,
+                content={'error': 'No file uploaded'}
+            )
+        if not file.filename.endswith('.csv'):
+            return JSONResponse(
+                status_code=400,
+                content={'error': 'File must be CSV format'}
+            )
+
+        contents = await file.read()
+        df = pd.read_csv(io.StringIO(contents.decode('utf-8')))
         df['date'] = pd.to_datetime(df['date'])
 
         predictor = SalesPredictor()
         result = predictor.train_model(df)
 
-        return jsonify({
+        end_time = datetime.now()
+        processing_time = (end_time - start_time).total_seconds()
+        logger.info(f"Training completed at {end_time}. Processing time: {processing_time:.2f} seconds")
+
+        return JSONResponse({
             'message': 'Model trained successfully',
             'metrics': result['metrics'],
-            'insights': result['insights']
+            'insights': result['insights'],
+            'processing_time': f"{processing_time:.2f} seconds"
         })
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        end_time = datetime.now()
+        processing_time = (end_time - start_time).total_seconds()
+        logger.error(f"Training error at {end_time} after {processing_time:.2f} seconds: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={'error': str(e)}
+        )
 
 
-@app.route('/predict', methods=['POST'])
-def predict():
+@app.post("/predict")
+async def predict(file: UploadFile = File(...)):
+    start_time = datetime.now()
+    logger.info(f"Prediction request received at {start_time}")
+
     try:
-        file = request.files['file']
-        df = pd.read_csv(file)
+        if not file:
+            return JSONResponse(
+                status_code=400,
+                content={'error': 'No file uploaded'}
+            )
+        if not file.filename.endswith('.csv'):
+            return JSONResponse(
+                status_code=400,
+                content={'error': 'File must be CSV format'}
+            )
+
+        contents = await file.read()
+        df = pd.read_csv(io.StringIO(contents.decode('utf-8')))
         df['date'] = pd.to_datetime(df['date'])
 
-        # Load model
         model_path = os.path.join('models', 'sales_model.pkl')
+        if not os.path.exists(model_path):
+            return JSONResponse(
+                status_code=400,
+                content={'error': 'Model not trained. Please train the model first.'}
+            )
+
         with open(model_path, 'rb') as f:
             model_data = pickle.load(f)
 
@@ -310,31 +412,40 @@ def predict():
         predictor.model = model_data['model']
         predictor.scaler = model_data['scaler']
 
-        # Process data and make predictions
         processed_data = predictor.create_features(df)
         X = processed_data[model_data['features']]
         X_scaled = predictor.scaler.transform(X)
         predictions = predictor.model.predict(X_scaled)
 
-        # Generate visualization
         plot_path = predictor.visualize_results(
             actual=df['sales'].values,
             predicted=predictions,
             dates=df['date']
         )
 
-        # Generate AI insights
         insights = predictor.generate_ai_insights(df)
 
-        return jsonify({
+        end_time = datetime.now()
+        processing_time = (end_time - start_time).total_seconds()
+        logger.info(f"Prediction completed at {end_time}. Processing time: {processing_time:.2f} seconds")
+
+        return JSONResponse({
             'predictions': predictions.tolist(),
             'plot_url': f'/{plot_path}',
-            'insights': insights
+            'insights': insights,
+            'processing_time': f"{processing_time:.2f} seconds"
         })
     except Exception as e:
-        logger.error(f"Prediction error: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        end_time = datetime.now()
+        processing_time = (end_time - start_time).total_seconds()
+        logger.error(f"Prediction error at {end_time} after {processing_time:.2f} seconds: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={'error': str(e)}
+        )
 
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    os.makedirs('models', exist_ok=True)
+    os.makedirs('static', exist_ok=True)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
