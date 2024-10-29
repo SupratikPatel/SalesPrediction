@@ -164,21 +164,6 @@ class SalesPredictor:
         except Exception as e:
             logger.error(f"Error generating AI insights: {str(e)}")
             return "Unable to generate AI insights at this time."
-    def create_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Enhanced feature engineering with advanced metrics"""
-        df = df.copy()
-
-        # Time-based features
-        df['year'] = df['date'].dt.year
-        df['month'] = df['date'].dt.month
-        df['quarter'] = df['date'].dt.quarter
-
-        # Sales metrics
-        for window in [7, 14, 30]:
-            df[f'sales_ma_{window}'] = df.groupby(['store', 'item'])['sales'].transform(
-                lambda x: x.rolling(window, min_periods=1).mean())
-
-        return df
 
     def train_model(self, train_data: pd.DataFrame) -> dict:
         """Train the model and generate insights"""
